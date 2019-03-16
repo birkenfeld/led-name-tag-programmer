@@ -7,7 +7,7 @@ particularly trustworthy.
 
 ## Requirements
 
-Python 3.x, PyQt5 and the `usb` library.
+Python 3.x, PyQt5 and the [PyUSB](https://pypi.org/project/pyusb/) library.
 
 ## Usage
 
