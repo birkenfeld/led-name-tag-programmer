@@ -25,6 +25,20 @@ from os import path
 from PyQt5 import Qt, uic
 from PyQt5.QtCore import pyqtSlot, pyqtSignal
 
+# Some general info:
+#
+# The display is configured by sending one or more packets to its USB
+# device on the interrupt endpoint 1.  (It registers as a HID device but
+# does not seem to do anything HID-related.)
+#
+# The first USB packet has the full 64 byte length and contains a header with
+# info about all 8 messages: animations, speed, other modes, and how the
+# following bitmaps are structured.  (There is also a timestamp in a funky
+# format, I don't really know what the device can do with it.)
+#
+# Following are as many packets as necessary where all active bitmaps are
+# simply concatenated.
+
 MAGIC = b'wang'
 
 HEADER = struct.Struct(
@@ -39,23 +53,47 @@ HEADER = struct.Struct(
     '20x'
 )
 
+# Number of messages possible.
+MESSAGES = 8
+
+# Number of bits per byte.  This can't really change :)
+BPB = 8
+
+# Apparently other sizes are possible.  Until I get to order and test one,
+# let's keep these as constants.
+HEIGHT = 11
+WIDTH = 44
+
+# Size of LED pixels and grid border in the preview.
+PREV_LED = 6
+PREV_GRID = 2
+PREV_PIXEL = PREV_LED + PREV_GRID
+
+# Possible selectable animations.
 ANIMS = ['Left', 'Right', 'Up', 'Down',
          'Freeze', 'Animate', 'Pileup', 'Split',
          'Laser', 'Smooth', 'Rotate']
 
-HEIGHT = 11
-
 
 class Bitmap(object):
-    """Bitmap in the required column-oriented format."""
+    """Bitmap which keeps data in the bytestream format.
+
+    Each bitmap's width comes in units of 8 pixels, since 8 pixels in a line
+    are stuffed into one byte.  The bitmap is a sequence of 11 (or HEIGHT) such
+    bytes at a time.
+
+    This is different from the usual format (complete scanlines being
+    contiguous in memory), so we convert to that here.
+    """
+
     def __init__(self, obj=b'', width=None):
         if isinstance(obj, Qt.QImage):
-            # convert a monochrome QImage
-            nbytes = (width + 7) // 8
+            assert obj.format() == Qt.QImage.Format_Mono
+            width_bytes = (width + 7) // BPB
             stride = obj.bytesPerLine()
             array = obj.bits().asarray(stride * HEIGHT)
             self.data = bytes(array[row*stride + col]
-                              for col in range(nbytes)
+                              for col in range(width_bytes)
                               for row in range(HEIGHT))
         else:
             self.data = obj
@@ -65,20 +103,27 @@ class Bitmap(object):
 
     @property
     def width(self):
-        return 8 * (len(self.data) // HEIGHT)
+        return BPB * (len(self.data) // HEIGHT)
 
     @property
-    def nbytes(self):
+    def width_bytes(self):
         return len(self.data) // HEIGHT
 
     def byte_pixels(self, i):
         for (row, data) in enumerate(self.data[HEIGHT*i:HEIGHT*(i+1)]):
-            for col in range(8):
+            for col in range(BPB):
                 if data & (1 << (7 - col)):
                     yield (col, row)
 
 
 class Message(object):
+    """Represents a single message.
+
+    It can be in one of two modes: if self.bitmap is None, it is generated
+    on the fly from self.text and associated font settings.  Otherwise the
+    bitmap is used directly.
+    """
+
     def __init__(self):
         self.active = False
         self.flash = False
@@ -115,9 +160,14 @@ class Message(object):
         return Bitmap(image, real_width)
 
 
-class Model(object):
+class Design(object):
+    """Represents all data that can be transferred to the display.
+
+    This object is pickled to save a design as a .leddesign file.
+    """
+
     def __init__(self):
-        self.messages = [Message() for _ in range(8)]
+        self.msgs = [Message() for _ in range(MESSAGES)]
 
     def genBytestream(self):
         t = time.localtime()
@@ -125,43 +175,52 @@ class Model(object):
                      t.tm_mday << 24 | t.tm_hour << 16 |
                      t.tm_min << 8 | t.tm_sec)
         bitmaps = [msg.genBitmap() if msg.active else Bitmap()
-                   for msg in self.messages]
+                   for msg in self.msgs]
         if all(not b for b in bitmaps):
             return b''
         header = HEADER.pack(
             MAGIC,
-            sum(msg.flash << i for (i, msg) in enumerate(self.messages)),
-            sum(msg.border << i for (i, msg) in enumerate(self.messages)),
-            *(msg.speed << 4 | msg.anim for msg in self.messages),
-            *(bmp.nbytes for bmp in bitmaps),
+            sum(msg.flash << i for (i, msg) in enumerate(self.msgs)),
+            sum(msg.border << i for (i, msg) in enumerate(self.msgs)),
+            *(msg.speed << 4 | msg.anim for msg in self.msgs),
+            *(bmp.width_bytes for bmp in bitmaps),
             timestamp)
         return b''.join([header] + [bmp.data for bmp in bitmaps])
 
 
 class Preview(Qt.QWidget):
+    """The widget used to draw the preview of the currently edited message."""
+
     def __init__(self, parent):
         Qt.QWidget.__init__(self, parent)
-        self.setMinimumHeight(90)
-        self.setMaximumHeight(90)
+        self.bitmap = Bitmap()
+        # we draw each pixel as 6x6 with a 2px wide grid inbetween
+        self.setMinimumHeight(PREV_PIXEL*HEIGHT + PREV_GRID)
+        self.setMaximumHeight(PREV_PIXEL*HEIGHT + PREV_GRID)
         self._grid = []
         self._background = Qt.QColor('black')
         self._gridcolor = Qt.QColor('#666666')
         self._ledcolor = Qt.QColor('#ff9900')
         self._endcolor = Qt.QColor('#00aa00')
         self._stopcolor = Qt.QColor('#ff0000')
+        # horizontal view offset (in 8-pixel units), controlled by scrollbar
         self.offset = 0
-        self.bitmap = Bitmap()
 
-    def _grid_horz(self, n, w):
-        return Qt.QLineF(0, 1 + 8*n, w, 1 + 8*n)
+    def _gridline_horz(self, n, w):
+        return Qt.QLineF(0, PREV_PIXEL*n + PREV_GRID//2,
+                         w, PREV_PIXEL*n + PREV_GRID//2)
 
-    def _grid_vert(self, n):
-        return Qt.QLineF(1 + 8*n, 0, 1 + 8*n, 2 + 8*HEIGHT)
+    def _gridline_vert(self, n):
+        return Qt.QLineF(1 + PREV_PIXEL*n, 0,
+                         1 + PREV_PIXEL*n, 2 + PREV_PIXEL*HEIGHT)
 
     def resizeEvent(self, event):
         w = self.width()
-        self._grid = [self._grid_vert(i) for i in range(1 + w//8)] + \
-                     [self._grid_horz(i, w) for i in range(HEIGHT + 1)]
+        # the always-visible grid lines can be generated here, since they
+        # don't change for every paint event
+        self._grid = \
+            [self._gridline_vert(i) for i in range(1 + w//PREV_PIXEL)] + \
+            [self._gridline_horz(i, w) for i in range(HEIGHT + 1)]
 
     def paintEvent(self, event):
         painter = Qt.QPainter(self)
@@ -171,20 +230,24 @@ class Preview(Qt.QWidget):
         painter.drawLines(self._grid)
         # draw lit up pixels
         painter.setPen(Qt.QPen(self._ledcolor, 2))
-        x0 = -1
-        for x0, ix in enumerate(range(self.offset, self.bitmap.nbytes)):
+        byte = -1
+        for byte, ix in enumerate(range(self.offset, self.bitmap.width_bytes)):
             for (x, y) in self.bitmap.byte_pixels(ix):
-                painter.fillRect(Qt.QRect(2 + 8*(8*x0 + x), 2 + 8*y, 6, 6),
+                painter.fillRect(Qt.QRect(2 + PREV_PIXEL*(BPB*byte + x),
+                                          2 + PREV_PIXEL*y,
+                                          PREV_LED, PREV_LED),
                                  self._ledcolor)
-        # draw end of 11x44 display
+        # draw end of display
         painter.setPen(Qt.QPen(self._stopcolor, 2))
-        painter.drawLine(self._grid_vert(44 - self.offset * 8))
+        painter.drawLine(self._gridline_vert(WIDTH - BPB*self.offset))
         # draw end of used display area
         painter.setPen(Qt.QPen(self._endcolor, 2))
-        painter.drawLine(self._grid_vert(8*(x0 + 1)))
+        painter.drawLine(self._gridline_vert(BPB*(byte + 1)))
 
 
 class MessageEditor(Qt.QWidget):
+    """One of the 8 identical widgets that edit the properties of a message."""
+
     changed = pyqtSignal()
 
     def __init__(self, number, parent):
@@ -239,15 +302,15 @@ class MainWindow(Qt.QMainWindow):
         Qt.QMainWindow.__init__(self)
         uic.loadUi('main.ui', self)
 
-        self.model = Model()
+        self.design = Design()
 
         self._delay_update = False
-        self.messageEditors = []
-        for i in range(8):
+        self.msgEditors = []
+        for i in range(MESSAGES):
             widget = MessageEditor(i+1, self)
-            widget.changed.connect(lambda i=i: self.updateModel(i))
+            widget.changed.connect(lambda i=i: self.updateDesign(i))
             self.msgBox.layout().addWidget(widget)
-            self.messageEditors.append(widget)
+            self.msgEditors.append(widget)
         self.preview = Preview(self)
         self.prevBox.layout().insertWidget(0, self.preview)
 
@@ -274,7 +337,7 @@ class MainWindow(Qt.QMainWindow):
     def loadDesign(self, fn):
         try:
             with open(fn, 'rb') as fp:
-                self.model = pickle.load(fp)
+                self.design = pickle.load(fp)
         except Exception as err:
             Qt.QMessageBox.warning(self, 'Error', 'Load failed: %s' % err)
         else:
@@ -293,12 +356,12 @@ class MainWindow(Qt.QMainWindow):
         settings.setValue('dir', path.dirname(fn))
         try:
             with open(fn, 'wb') as fp:
-                pickle.dump(self.model, fp, pickle.HIGHEST_PROTOCOL)
+                pickle.dump(self.design, fp, pickle.HIGHEST_PROTOCOL)
         except Exception as err:
             Qt.QMessageBox.warning(self, 'Error', 'Save failed: %s' % err)
 
     def _get_bytestream(self):
-        bytestream = self.model.genBytestream()
+        bytestream = self.design.genBytestream()
         if not bytestream:
             Qt.QMessageBox.information(
                 self, 'Error',
@@ -340,26 +403,12 @@ class MainWindow(Qt.QMainWindow):
             Qt.QMessageBox.warning(self, 'Error occurred',
                                    output[0].decode('latin1'))
 
-    def updateModel(self, i):
-        if self._delay_update:
-            return
-        editor = self.messageEditors[i]
-        msg = self.model.messages[i]
-        msg.active = editor.activeBox.isChecked()
-        msg.flash = editor.flashBox.isChecked()
-        msg.border = editor.borderBox.isChecked()
-        msg.anim = editor.animBox.currentIndex()
-        msg.speed = editor.speedBox.value() - 1
-        msg.offset = editor.offsetBox.value()
-        msg.text = editor.textEdit.text()
-        msg.font = editor.font.toString()
-        msg.bitmap = editor.bitmap
-        self.updatePreview(i)
-
     def updateEditors(self):
+        """Update the editor widgets with new design data."""
+        # prevent the widgets triggering an update in the other direction
         self._delay_update = True
         try:
-            for (msg, editor) in zip(self.model.messages, self.messageEditors):
+            for (msg, editor) in zip(self.design.msgs, self.msgEditors):
                 editor.activeBox.setChecked(msg.active)
                 editor.flashBox.setChecked(msg.flash)
                 editor.borderBox.setChecked(msg.border)
@@ -373,15 +422,35 @@ class MainWindow(Qt.QMainWindow):
         finally:
             self._delay_update = False
 
-    def updatePreview(self, i):
+    def updateDesign(self, i):
+        """Update the i-th message with new data from the editor."""
         if self._delay_update:
             return
-        msg = self.model.messages[i]
+        editor = self.msgEditors[i]
+        msg = self.design.msgs[i]
+        msg.active = editor.activeBox.isChecked()
+        msg.flash = editor.flashBox.isChecked()
+        msg.border = editor.borderBox.isChecked()
+        msg.anim = editor.animBox.currentIndex()
+        msg.speed = editor.speedBox.value() - 1
+        msg.offset = editor.offsetBox.value()
+        msg.text = editor.textEdit.text()
+        msg.font = editor.font.toString()
+        msg.bitmap = editor.bitmap
+        self.updatePreview(i)
+
+    def updatePreview(self, i):
+        """Update the bitmap to be drawn in the preview from message i."""
+        if self._delay_update:
+            return
+        msg = self.design.msgs[i]
         self.prevBox.setTitle('Preview: Message %s' % (i + 1))
         bitmap = msg.genBitmap()
         self.preview.bitmap = bitmap
+        # if the message bitmap is wider than the available horizontal
+        # preview space, activate the scrollbar
         bytes_visible = self.preview.width() // 64
-        max_scroll = max(bitmap.nbytes - bytes_visible, 0)
+        max_scroll = max(bitmap.width_bytes - bytes_visible, 0)
         self.prevScroll.setRange(0, max_scroll)
         self.preview.update()
 
