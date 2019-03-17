@@ -24,6 +24,11 @@ VENDOR_ID  = 0x0416  # Winbond... :)
 PRODUCT_ID = 0x5020
 
 
+def error(msg):
+    print('Error:', msg, file=sys.stderr)
+    sys.exit(1)
+
+
 parser = argparse.ArgumentParser(
     description='Uploads a configuration to a 11x44 monochrome LED name tag')
 parser.add_argument('config', help='File with the byte stream to configure, '
@@ -38,15 +43,15 @@ else:
 
 dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
 if dev is None:
-    parser.error('Did not find a name tag device')
+    error('Did not find a name tag device')
 try:
     if dev.is_kernel_driver_active(0):
         dev.detach_kernel_driver(0)
     interface = dev.configurations()[0].interfaces()[0]
     endpoint = usb.util.find_descriptor(interface, bEndpointAddress=1)
 except Exception as err:
-    parser.error('Could not configure the device: %s' % err)
+    error('Could not configure the device: %s' % err)
 try:
     endpoint.write(bytestream)
 except Exception as err:
-    parser.error('Could not write to the device: %s' % err)
+    error('Could not write to the device: %s' % err)

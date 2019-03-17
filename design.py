@@ -140,12 +140,12 @@ class Message(object):
             return self.bitmap
         font = Qt.QFont()
         font.fromString(self.font)
-        # use this to get an estimation; for some reason the bounding rect
-        # calculated here is wrong by quite a bit
-        width = Qt.QFontMetrics(font).boundingRect(self.text).width()
+        # for some reason the bounding rect calculated here is wrong by quite a
+        # bit, so let's use twice as a rough estimation
+        width = 2 * Qt.QFontMetrics(font).boundingRect(self.text).width()
         if not width:
             return Bitmap()
-        image = Qt.QImage(2*width, HEIGHT, Qt.QImage.Format_Mono)
+        image = Qt.QImage(width, HEIGHT, Qt.QImage.Format_Mono)
         image.fill(0)
         with Qt.QPainter(image) as painter:
             # no antialiasing
@@ -154,7 +154,7 @@ class Message(object):
             painter.setPen(Qt.QPen(Qt.QColor('white')))
             # here we get the real width of the drawn text
             real_width = painter.drawText(0, -self.offset,
-                                          2*width, HEIGHT + self.offset,
+                                          width, HEIGHT + self.offset,
                                           Qt.Qt.AlignTop | Qt.Qt.AlignLeft,
                                           self.text).width()
         return Bitmap(image, real_width)
@@ -211,37 +211,37 @@ class Preview(Qt.QWidget):
                          w, PREV_PIXEL*n + PREV_GRID//2)
 
     def _gridline_vert(self, n):
-        return Qt.QLineF(1 + PREV_PIXEL*n, 0,
-                         1 + PREV_PIXEL*n, 2 + PREV_PIXEL*HEIGHT)
+        return Qt.QLineF(
+            PREV_PIXEL*n + PREV_GRID//2, 0,
+            PREV_PIXEL*n + PREV_GRID//2, PREV_PIXEL*HEIGHT + PREV_GRID)
 
     def resizeEvent(self, event):
         w = self.width()
         # the always-visible grid lines can be generated here, since they
         # don't change for every paint event
         self._grid = \
-            [self._gridline_vert(i) for i in range(1 + w//PREV_PIXEL)] + \
+            [self._gridline_vert(i) for i in range(w//PREV_PIXEL + 1)] + \
             [self._gridline_horz(i, w) for i in range(HEIGHT + 1)]
 
     def paintEvent(self, event):
         painter = Qt.QPainter(self)
         painter.fillRect(painter.window(), self._background)
         # draw basic grid
-        painter.setPen(Qt.QPen(self._gridcolor, 2))
+        painter.setPen(Qt.QPen(self._gridcolor, PREV_GRID))
         painter.drawLines(self._grid)
         # draw lit up pixels
-        painter.setPen(Qt.QPen(self._ledcolor, 2))
         byte = -1
         for byte, ix in enumerate(range(self.offset, self.bitmap.width_bytes)):
             for (x, y) in self.bitmap.byte_pixels(ix):
-                painter.fillRect(Qt.QRect(2 + PREV_PIXEL*(BPB*byte + x),
-                                          2 + PREV_PIXEL*y,
-                                          PREV_LED, PREV_LED),
-                                 self._ledcolor)
+                painter.fillRect(
+                    Qt.QRect(PREV_GRID + PREV_PIXEL*(BPB*byte + x),
+                             PREV_GRID + PREV_PIXEL*y, PREV_LED, PREV_LED),
+                    self._ledcolor)
         # draw end of display
-        painter.setPen(Qt.QPen(self._stopcolor, 2))
+        painter.setPen(Qt.QPen(self._stopcolor, PREV_GRID))
         painter.drawLine(self._gridline_vert(WIDTH - BPB*self.offset))
         # draw end of used display area
-        painter.setPen(Qt.QPen(self._endcolor, 2))
+        painter.setPen(Qt.QPen(self._endcolor, PREV_GRID))
         painter.drawLine(self._gridline_vert(BPB*(byte + 1)))
 
 
@@ -307,7 +307,7 @@ class MainWindow(Qt.QMainWindow):
         self._delay_update = False
         self.msgEditors = []
         for i in range(MESSAGES):
-            widget = MessageEditor(i+1, self)
+            widget = MessageEditor(i + 1, self)
             widget.changed.connect(lambda i=i: self.updateDesign(i))
             self.msgBox.layout().addWidget(widget)
             self.msgEditors.append(widget)
