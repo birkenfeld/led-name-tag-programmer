@@ -282,10 +282,10 @@ class MessageEditor(Qt.QWidget):
             Qt.QMessageBox.warning(self, 'Error', 'Image could not be read.')
             return
         img.convertToFormat(Qt.QImage.Format_Mono, Qt.Qt.MonoOnly)
-        # make sure we have at least the required height
-        if img.height() < HEIGHT:
-            img = img.copy(0, 0, img.width(), HEIGHT)
         img.invertPixels()
+        # make sure we have at least the required height, and width divisible
+        # by 8 to avoid garbage in the scanlines
+        img = img.copy(0, 0, (img.width() + 7) & ~7, HEIGHT)
         self.bitmap = Bitmap(img, min(img.width(), 4096))
         self.changed.emit()
 
