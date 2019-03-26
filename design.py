@@ -350,7 +350,8 @@ class MainWindow(Qt.QMainWindow):
         default_dir = settings.value('dir', '') or ''
         fn, ok = Qt.QFileDialog.getSaveFileName(
             self, 'Select save file', default_dir,
-            'LED design files (*.leddesign);;All (*)')
+            'LED design files (*.leddesign);;All (*)',
+            'LED design files (*.leddesign)')
         if not ok:
             return
         settings.setValue('dir', path.dirname(fn))
@@ -381,7 +382,8 @@ class MainWindow(Qt.QMainWindow):
         default_dir = settings.value('leddir', '') or ''
         fn, ok = Qt.QFileDialog.getSaveFileName(
             self, 'Select save file', default_dir,
-            'LED bytestream files (*.led);;All (*)')
+            'LED bytestream files (*.led);;All (*)',
+            'LED bytestream files (*.led)')
         if not ok:
             return
         settings.setValue('leddir', path.dirname(fn))
