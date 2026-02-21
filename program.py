@@ -48,7 +48,15 @@ try:
     if dev.is_kernel_driver_active(0):
         dev.detach_kernel_driver(0)
     interface = dev.configurations()[0].interfaces()[0]
-    endpoint = usb.util.find_descriptor(interface, bEndpointAddress=1)
+    cfg = dev.get_active_configuration()
+    intf = cfg[(0,0)]
+    endpoint = usb.util.find_descriptor(
+        intf,
+        # match the first OUT endpoint
+        custom_match = \
+        lambda e:
+            usb.util.endpoint_direction(e.bEndpointAddress) == \
+            usb.util.ENDPOINT_OUT)
 except Exception as err:
     error('Could not configure the device: %s' % err)
 try:
